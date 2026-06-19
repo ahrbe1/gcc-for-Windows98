@@ -1,41 +1,56 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ============================================================================
+# verify-extras-package.sh — verify the extras-toolset directory or tarball
+# ============================================================================
+# Two-mode (mirrors verify-native-package.sh):
+#   * directory mode — scans out/extras-toolset/ directly
+#   * artifact mode  — extracts gcc-win98-extras.zip to a tmpdir, scans that
+#
+# Checks:
+#   1. Required tools are present (busybox.exe, sh.exe, make.exe,
+#      ctags.exe, diff.exe, patch.exe, gdb.exe, muon.exe).
+#   2. Every .exe / .dll passes the Win98 PE compatibility check via
+#      pe_check_win98 (no UCRT/api-ms-win/vcruntime imports, MajorOSVersion ≤ 4).
+# ============================================================================
+
 REPRO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$REPRO_ROOT/out/package"
-ARTIFACT_PATH="$PACKAGE_DIR/gcc-win98-native-toolset.zip"
-NATIVE_DIR="$REPRO_ROOT/out/native-toolset"
+ARTIFACT_PATH="$PACKAGE_DIR/gcc-win98-extras.zip"
+EXTRAS_DIR="$REPRO_ROOT/out/extras-toolset"
 
+source "$SCRIPT_DIR/../lib/common.sh"
 source "$SCRIPT_DIR/pe-win98-check.sh"
 
 VERIFY_MODE=""
 SCAN_ROOT=""
 
-if [[ -d "$NATIVE_DIR" ]]; then
+if [[ -d "$EXTRAS_DIR" ]]; then
     VERIFY_MODE="directory"
-    SCAN_ROOT="$NATIVE_DIR"
-    echo "Verifying native toolset directory: $NATIVE_DIR"
+    SCAN_ROOT="$EXTRAS_DIR"
+    echo "Verifying extras toolset directory: $EXTRAS_DIR"
 elif [[ -f "$ARTIFACT_PATH" ]]; then
     VERIFY_MODE="artifact"
-    echo "Verifying native package artifact: $ARTIFACT_PATH"
+    echo "Verifying extras package artifact: $ARTIFACT_PATH"
 else
-    echo "ERROR: Neither native directory nor package artifact found"
+    echo "ERROR: Neither extras directory nor package artifact found"
     echo "  Expected one of:"
-    echo "    $NATIVE_DIR"
+    echo "    $EXTRAS_DIR"
     echo "    $ARTIFACT_PATH"
     exit 1
 fi
 
-# Confirm required paths from the current packaged layout.
-# The archive may either be rooted directly or under a single top-level folder
-# such as gcc_win98/.
 REQUIRED_PATHS=(
-    "bin/gcc.exe"
-    "bin/g++.exe"
-    "bin/ar.exe"
-    "bin/ld.exe"
-    "i686-w64-mingw32/include/stdio.h"
+    "bin/busybox.exe"
+    "bin/sh.exe"
+    "bin/make.exe"
+    "bin/ctags.exe"
+    "bin/diff.exe"
+    "bin/patch.exe"
+    "bin/gdb.exe"
+    "bin/muon.exe"
 )
 
 if [[ "$VERIFY_MODE" == "directory" ]]; then
@@ -75,32 +90,25 @@ for p in "${REQUIRED_PATHS[@]}"; do
 done
 
 if [[ "$VERIFY_MODE" == "artifact" ]]; then
-    TMPDIR_NATIVE=$(mktemp -d)
+    TMPDIR_EXTRAS=$(mktemp -d)
     cleanup() {
-        rm -rf "$TMPDIR_NATIVE"
+        rm -rf "$TMPDIR_EXTRAS"
     }
     trap cleanup EXIT
 
-    unzip -q -d "$TMPDIR_NATIVE" "$ARTIFACT_PATH"
-    SCAN_ROOT="$TMPDIR_NATIVE"
+    unzip -q -d "$TMPDIR_EXTRAS" "$ARTIFACT_PATH"
+    SCAN_ROOT="$TMPDIR_EXTRAS"
 fi
 
-check_no_prereq_runtime_imports() {
-    local exe_path="$1"
-    if objdump -p "$exe_path" 2>/dev/null | grep -Eiq 'DLL Name: .*(gmp|mpfr|mpc)'; then
-        echo "  [UNEXPECTED-RUNTIME-DEP] $exe_path imports GMP/MPFR/MPC"
-        exit 1
-    fi
-    echo "  [OK] no GMP/MPFR/MPC runtime imports in ${exe_path#$SCAN_ROOT/}"
-}
-
-while IFS= read -r exe_path; do
-    check_no_prereq_runtime_imports "$exe_path"
-done < <(find "$SCAN_ROOT" -type f \( -name 'gcc.exe' -o -name 'g++.exe' \) | sort)
-
-echo "Running Win98 PE compatibility checks across extracted binaries..."
+echo "Running Win98 PE compatibility checks across extras binaries..."
 PE_PASS=0
 PE_FAIL=0
+
+# bcrypt.dll is shipped in this package as a shim (BCryptGenRandom only) so
+# gdb.exe's libstdc++ random_device import resolves on Win98. Tell the PE
+# checker to treat it as bundled — the shim itself still goes through the
+# full check below on its own merits (msvcrt + kernel32 imports only).
+export PE_CHECK_BUNDLED_DLLS="bcrypt.dll"
 
 while IFS= read -r pe_path; do
     # `|| true` so set -e doesn't kill us on rc=1 before we get to the
@@ -121,7 +129,7 @@ while IFS= read -r pe_path; do
 done < <(find "$SCAN_ROOT" -type f \( -iname '*.exe' -o -iname '*.dll' \) | sort)
 
 if [[ "$PE_FAIL" -gt 0 ]]; then
-    echo "Native package verification: FAIL"
+    echo "Extras package verification: FAIL"
     echo "  Win98 PE check failed for $PE_FAIL binary file(s)"
     exit 1
 fi
@@ -132,9 +140,11 @@ if [[ "$VERIFY_MODE" == "artifact" ]]; then
     SHA256=$(sha256sum "$ARTIFACT_PATH" | awk '{print $1}')
     SIZE=$(stat -c%s "$ARTIFACT_PATH")
 
-    echo "Native package verification: PASS"
+    echo "Extras package verification: PASS"
     echo "  SHA256: $SHA256"
     echo "  Size: $SIZE bytes"
 else
-    echo "Native toolset directory verification: PASS"
+    echo "Extras toolset directory verification: PASS"
 fi
+
+mark_done verify-extras-package
